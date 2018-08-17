@@ -19,10 +19,7 @@ package com.yahoo.ycsb.measurements;
 
 import com.yahoo.ycsb.measurements.exporter.MeasurementsExporter;
 
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.PrintStream;
+import java.io.*;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedList;
@@ -88,9 +85,19 @@ public class OneMeasurementRaw extends OneMeasurement {
   public static final String NO_SUMMARY_STATS = "measurement.raw.no_summary";
   public static final String NO_SUMMARY_STATS_DEFAULT = "false";
 
-  private final PrintStream outputStream;
+  /**
+   * Specifies how the user wants the raw data points to be printed. Setting to text
+   * will write the numbers as strings. Binary is less verbose and will write the numbers
+   * in binary format.
+   */
+  public static final String PRINT_FORMAT = "measurement.raw.print_format";
+  public static final String PRINT_FORMAT_DEFAULT = "text";
+
+  private final DataOutputStream outputStream;
 
   private boolean noSummaryStats = false;
+
+  private String printFormat = "text";
 
   private LinkedList<RawDataPoint> measurements;
   private long totalLatency = 0;
@@ -101,30 +108,39 @@ public class OneMeasurementRaw extends OneMeasurement {
   private int windowOperations = 0;
   private long windowTotalLatency = 0;
 
+  private String outputFilePath;
+
+  private String newLine = System.getProperty("line.separator");
+
+  private DataInputStream inputStream;
+
   public OneMeasurementRaw(String name, Properties props) {
     super(name);
 
-    String outputFilePath = props.getProperty(OUTPUT_FILE_PATH, OUTPUT_FILE_PATH_DEFAULT);
+    outputFilePath = props.getProperty(OUTPUT_FILE_PATH, OUTPUT_FILE_PATH_DEFAULT);
     if (!outputFilePath.isEmpty()) {
       System.out.println("Raw data measurement: will output to result file: " +
           outputFilePath);
 
       try {
-        outputStream = new PrintStream(
-            new FileOutputStream(outputFilePath, true),
-            true);
+        outputStream = new DataOutputStream(
+            new FileOutputStream(outputFilePath, true));
+        inputStream = new DataInputStream(
+            new FileInputStream(outputFilePath));
       } catch (FileNotFoundException e) {
         throw new RuntimeException("Failed to open raw data output file", e);
       }
 
     } else {
       System.out.println("Raw data measurement: will output to stdout.");
-      outputStream = System.out;
+      outputStream = new DataOutputStream(System.out);
 
     }
 
     noSummaryStats = Boolean.parseBoolean(props.getProperty(NO_SUMMARY_STATS,
         NO_SUMMARY_STATS_DEFAULT));
+
+    printFormat = props.getProperty(PRINT_FORMAT, PRINT_FORMAT_DEFAULT);
 
     measurements = new LinkedList<>();
   }
@@ -144,16 +160,27 @@ public class OneMeasurementRaw extends OneMeasurement {
     // Output raw data points first then print out a summary of percentiles to
     // stdout.
 
-    outputStream.println(getName() +
-        " latency raw data: op, timestamp(ms), latency(us)");
-    for (RawDataPoint point : measurements) {
-      outputStream.println(
-          String.format("%s,%d,%d", getName(), point.timeStamp(),
-              point.value()));
+    if(printFormat.equals("text")) {
+      outputStream.writeBytes(getName() +
+          " latency raw data: op, timestamp(ms), latency(us)" + newLine);
+
+      for (RawDataPoint point : measurements) {
+        outputStream.writeBytes(
+            String.format("%s,%d,%d", getName(), point.timeStamp(),
+                point.value()) + newLine);
+      }
     }
-    if (outputStream != System.out) {
-      outputStream.close();
+    else
+    {
+      outputStream.writeBytes("MEASUREMENT METRIC - " + getName() + newLine);
+      for (RawDataPoint point : measurements) {
+        outputStream.writeLong(point.timeStamp());
+        outputStream.writeInt(point.value());
+      }
     }
+    //if (outputFilePath.isEmpty()) {
+    //  outputStream.close();
+    //}
 
     int totalOps = measurements.size();
     exporter.write(getName(), "Total Operations", totalOps);

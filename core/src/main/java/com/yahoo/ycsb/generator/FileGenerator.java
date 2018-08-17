@@ -65,7 +65,7 @@ public class FileGenerator extends Generator<String> {
    */
   public synchronized void reloadFile() {
     try (Reader r = reader) {
-      System.err.println("Reload " + filename);
+      System.err.println("Loading " + filename);
       reader = new BufferedReader(new FileReader(filename));
     } catch (IOException e) {
       throw new RuntimeException(e);

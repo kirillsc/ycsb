@@ -96,6 +96,8 @@ public abstract class Workload {
    */
   public abstract boolean doTransaction(DB db, Object threadstate);
 
+  public abstract long getDeadlineForTransaction(long startTimeNs, int opsdone, long targetOpsTickNs);
+
   /**
    * Allows scheduling a request to stop the workload.
    */

@@ -17,6 +17,7 @@
 
 package com.yahoo.ycsb.db;
 
+import com.google.common.util.concurrent.ListenableFuture;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -50,6 +51,36 @@ import com.yahoo.ycsb.Status;
 public class NoSqlDbClient extends DB {
 
   private KVStore store;
+
+
+  /**
+   * Read a record asychnronoulsy from the database and return a future.
+   *
+   * @param table  The name of the table
+   * @param key    The record key of the record to read.
+   * @param fields The list of fields to read, or null for all of them
+   * @param result A HashMap of field/value pairs for the result
+   * @return The future for the result.
+   */
+  @Override
+  public ListenableFuture readAsync(String table, String key, Set<String> fields, HashMap<String, ByteIterator> result) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Parses the result of the future from the read async. This function is necessary to allow DBWrapper
+   * to measure time when callback is successful
+   *
+   * @param key      The record key of the record to read.
+   * @param returned Proprietary (DB-impl specific object) containing result.
+   * @param result   A HashMap of field/value pairs for the result
+   * @return The status of the operation.
+   */
+  @Override
+  public Status parseReadAsync(String key, Object returned, HashMap<String, ByteIterator> result) {
+    throw new UnsupportedOperationException();
+  }
+
 
   private int getPropertyInt(Properties properties, String key,
       int defaultValue) throws DBException {
@@ -157,7 +188,7 @@ public class NoSqlDbClient extends DB {
   /**
    * Create a key object. We map "table" and (YCSB's) "key" to a major component
    * of the oracle.kv.Key, and "field" to a minor component.
-   * 
+   *
    * @return An oracle.kv.Key object.
    */
   private static Key createKey(String table, String key, String field) {
@@ -247,4 +278,13 @@ public class NoSqlDbClient extends DB {
     return Status.OK;
   }
 
+  @Override
+  public ListenableFuture updateAsync(String table, String keyname, HashMap<String, ByteIterator> values) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public ListenableFuture insertAsync(String table, String dbkey, HashMap<String, ByteIterator> values) {
+    throw new UnsupportedOperationException();
+  }
 }

@@ -16,6 +16,7 @@
  */
 package com.yahoo.ycsb.db;
 
+import com.google.common.util.concurrent.ListenableFuture;
 import com.yahoo.ycsb.DB;
 import com.yahoo.ycsb.DBException;
 import com.yahoo.ycsb.ByteIterator;
@@ -339,6 +340,34 @@ public class JdbcDBClient extends DB {
     }
   }
 
+  /**
+   * Read a record asychnronoulsy from the database and return a future.
+   *
+   * @param table  The name of the table
+   * @param key    The record key of the record to read.
+   * @param fields The list of fields to read, or null for all of them
+   * @param result A HashMap of field/value pairs for the result
+   * @return The future for the result.
+   */
+  @Override
+  public ListenableFuture readAsync(String table, String key, Set<String> fields, HashMap<String, ByteIterator> result) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Parses the result of the future from the read async. This function is necessary to allow DBWrapper
+   * to measure time when callback is successful
+   *
+   * @param key      The record key of the record to read.
+   * @param returned Proprietary (DB-impl specific object) containing result.
+   * @param result   A HashMap of field/value pairs for the result
+   * @return The status of the operation.
+   */
+  @Override
+  public Status parseReadAsync(String key, Object returned, HashMap<String, ByteIterator> result) {
+    throw new UnsupportedOperationException();
+  }
+
   @Override
   public Status scan(String tableName, String startKey, int recordcount, Set<String> fields,
                      Vector<HashMap<String, ByteIterator>> result) {
@@ -497,5 +526,15 @@ public class JdbcDBClient extends DB {
     }
 
     return new OrderedFieldInfo(fieldKeys, fieldValues);
+  }
+
+  @Override
+  public ListenableFuture updateAsync(String table, String keyname, HashMap<String, ByteIterator> values) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public ListenableFuture insertAsync(String table, String dbkey, HashMap<String, ByteIterator> values) {
+    throw new UnsupportedOperationException();
   }
 }

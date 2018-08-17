@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- 
+<!--
 Copyright (c) 2012 - 2016 YCSB contributors. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License"); you
@@ -108,18 +108,18 @@ LICENSE file.
     <module>core</module>
     <module>binding-parent</module>
     <!-- all the datastore bindings, lex sorted please -->
-    <module>accumulo</module>
+    <!-- <module>accumulo</module>
     <module>aerospike</module>
     <module>arangodb</module>
     <module>arangodb3</module>
     <module>asynchbase</module>
-    <module>azuretablestorage</module>
+    <module>azuretablestorage</module> -->
     <module>cassandra</module>
-    <module>cloudspanner</module>
+    <!-- <module>cloudspanner</module>
     <module>couchbase</module>
-    <module>couchbase2</module>
+    <module>couchbase2</module> -->
     <module>distribution</module>
-    <module>azuredocumentdb</module>
+    <!-- <module>azuredocumentdb</module>
     <module>dynamodb</module>
     <module>elasticsearch</module>
     <module>geode</module>
@@ -129,14 +129,14 @@ LICENSE file.
     <module>hbase098</module>
     <module>hbase10</module>
     <module>hypertable</module>
-    <module>infinispan</module>
+    <module>infinispan</module> -->
     <module>jdbc</module>
-    <module>kudu</module>
+    <!-- <module>kudu</module> -->
     <!--<module>mapkeeper</module>-->
-    <module>memcached</module>
-    <module>mongodb</module>
+    <!-- <module>memcached</module>
+    <module>mongodb</module> -->
     <module>nosqldb</module>
-    <module>orientdb</module>
+    <!-- <module>orientdb</module>
     <module>rados</module>
     <module>redis</module>
     <module>rest</module>
@@ -144,7 +144,7 @@ LICENSE file.
     <module>s3</module>
     <module>solr</module>
     <module>solr6</module>
-    <module>tarantool</module>
+    <module>tarantool</module> -->
     <!--<module>voldemort</module>-->
   </modules>
 
@@ -166,6 +166,7 @@ LICENSE file.
         <configuration>
           <source>1.7</source>
           <target>1.7</target>
+          <skip>true</skip>
         </configuration>
       </plugin>
       <plugin>
@@ -180,6 +181,7 @@ LICENSE file.
             </goals>
             <configuration>
               <configLocation>checkstyle.xml</configLocation>
+              <skip>true</skip>
             </configuration>
           </execution>
         </executions>

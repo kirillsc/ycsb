@@ -17,6 +17,7 @@
 
 package com.yahoo.ycsb.workloads;
 
+import com.sun.org.apache.xpath.internal.operations.Bool;
 import com.yahoo.ycsb.*;
 import com.yahoo.ycsb.generator.*;
 import com.yahoo.ycsb.measurements.Measurements;
@@ -308,6 +309,14 @@ public class CoreWorkload extends Workload {
   public static final String INSERTION_RETRY_INTERVAL = "core_workload_insertion_retry_interval";
   public static final String INSERTION_RETRY_INTERVAL_DEFAULT = "3";
 
+  /**
+   * The name of the property for deciding whether to send queries asynchronously.
+   */
+  public static final String SEND_ASYNC_PROPERTY = "sendasync";
+  public static final String SEND_ASYNC_PROPERTY_DEFAULT = "false";
+
+  private boolean sendasync;
+
   protected NumberGenerator keysequence;
   protected DiscreteGenerator operationchooser;
   protected NumberGenerator keychooser;
@@ -398,12 +407,22 @@ public class CoreWorkload extends Workload {
 
     dataintegrity = Boolean.parseBoolean(
         p.getProperty(DATA_INTEGRITY_PROPERTY, DATA_INTEGRITY_PROPERTY_DEFAULT));
+
+    sendasync = Boolean.parseBoolean(
+        p.getProperty(SEND_ASYNC_PROPERTY, SEND_ASYNC_PROPERTY_DEFAULT));
+
     // Confirm that fieldlengthgenerator returns a constant if data
     // integrity check requested.
     if (dataintegrity && !(p.getProperty(
         FIELD_LENGTH_DISTRIBUTION_PROPERTY,
         FIELD_LENGTH_DISTRIBUTION_PROPERTY_DEFAULT)).equals("constant")) {
       System.err.println("Must have constant field size to check data integrity.");
+      System.exit(-1);
+    }
+
+    if(dataintegrity && sendasync) {
+      System.err.println("Must not send queries asynchronously to check data integrity. This feature" +
+          "is yet to be implemented.");
       System.exit(-1);
     }
 
@@ -680,7 +699,13 @@ public class CoreWorkload extends Workload {
     }
 
     HashMap<String, ByteIterator> cells = new HashMap<String, ByteIterator>();
-    db.read(table, keyname, fields, cells);
+
+    if(!sendasync) {
+      db.read(table, keyname, fields, cells);
+    }
+    else {
+      db.readAsync(table, keyname, fields, cells);
+    }
 
     if (dataintegrity) {
       verifyRow(keyname, cells);
@@ -772,7 +797,12 @@ public class CoreWorkload extends Workload {
       values = buildSingleValue(keyname);
     }
 
-    db.update(table, keyname, values);
+    if(!sendasync) {
+      db.update(table, keyname, values);
+    }
+    else {
+      db.updateAsync(table, keyname, values);
+    }
   }
 
   public void doTransactionInsert(DB db) {
@@ -783,10 +813,21 @@ public class CoreWorkload extends Workload {
       String dbkey = buildKeyName(keynum);
 
       HashMap<String, ByteIterator> values = buildValues(dbkey);
-      db.insert(table, dbkey, values);
+
+      if(!sendasync) {
+        db.insert(table, dbkey, values);
+      }
+      else {
+        db.insertAsync(table, dbkey, values);
+      }
     } finally {
       transactioninsertkeysequence.acknowledge(keynum);
     }
+  }
+
+  @Override
+  public long getDeadlineForTransaction(long startTimeNs, int opsdone, long targetOpsTickNs) {
+    return startTimeNs + Math.max(opsdone * targetOpsTickNs, targetOpsTickNs);
   }
 
   /**

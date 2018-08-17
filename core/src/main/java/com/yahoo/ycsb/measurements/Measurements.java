@@ -20,7 +20,10 @@ package com.yahoo.ycsb.measurements;
 import com.yahoo.ycsb.Status;
 import com.yahoo.ycsb.measurements.exporter.MeasurementsExporter;
 
+import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -37,7 +40,9 @@ public class Measurements {
     HDRHISTOGRAM_AND_HISTOGRAM,
     HDRHISTOGRAM_AND_RAW,
     TIMESERIES,
-    RAW
+    RAW,
+    RAW_OPTIMIZED,
+    None
   }
 
   public static final String MEASUREMENT_TYPE_PROPERTY = "measurementtype";
@@ -101,6 +106,12 @@ public class Measurements {
     case "raw":
       measurementType = MeasurementType.RAW;
       break;
+    case "rawoptimized":
+      measurementType = MeasurementType.RAW_OPTIMIZED;
+      break;
+    case "none":
+      measurementType = MeasurementType.None;
+      break;
     default:
       throw new IllegalArgumentException("unknown " + MEASUREMENT_TYPE_PROPERTY + "=" + mTypeString);
     }
@@ -139,6 +150,10 @@ public class Measurements {
       return new OneMeasurementTimeSeries(name, props);
     case RAW:
       return new OneMeasurementRaw(name, props);
+    case RAW_OPTIMIZED:
+      return new OneMeasurementRawOptimized(name, props);
+    case None:
+      return new OneMeasurementNone(name, props);
     default:
       throw new AssertionError("Impossible to be here. Dead code reached. Bugs?");
     }
@@ -261,6 +276,24 @@ public class Measurements {
     }
     for (OneMeasurement measurement : opToIntendedMesurementMap.values()) {
       measurement.exportMeasurements(exporter);
+    }
+
+    //Merge all output from exporters into one
+    if(measurementType.equals(MeasurementType.RAW_OPTIMIZED))
+    {
+      String outputFilePath = props.getProperty(OneMeasurementRawOptimized.OUTPUT_FILE_PATH,
+          OneMeasurementRawOptimized.OUTPUT_FILE_PATH_DEFAULT);
+      if(!outputFilePath.isEmpty())
+      {
+        List<File> inputs = new ArrayList<File>();
+        for(OneMeasurement measurement : opToMesurementMap.values()) {
+          inputs.add(new File(outputFilePath + measurement.getName()));
+        }
+        for(OneMeasurement measurement : opToIntendedMesurementMap.values()) {
+          inputs.add(new File(outputFilePath + measurement.getName()));
+        }
+        OneMeasurementRawOptimized.mergeFiles(inputs, new File(outputFilePath), false);
+      }
     }
   }
 

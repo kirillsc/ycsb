@@ -17,11 +17,15 @@
 
 package com.yahoo.ycsb;
 
+import com.google.common.util.concurrent.*;
 import com.yahoo.ycsb.measurements.Measurements;
 import org.apache.htrace.core.TraceScope;
 import org.apache.htrace.core.Tracer;
 
+import java.nio.ByteBuffer;
+import java.sql.ResultSet;
 import java.util.*;
+import java.util.concurrent.Executors;
 
 /**
  * Wrapper around a "real" DB that measures latencies and counts return codes.
@@ -35,8 +39,18 @@ public class DBWrapper extends DB {
   private boolean reportLatencyForEachError = false;
   private HashSet<String> latencyTrackedErrors = new HashSet<String>();
 
+  private boolean measurementsDedicatedPool;
+  private int measurementsThreads;
+  private ListeningExecutorService les;
+
   private static final String REPORT_LATENCY_FOR_EACH_ERROR_PROPERTY = "reportlatencyforeacherror";
   private static final String REPORT_LATENCY_FOR_EACH_ERROR_PROPERTY_DEFAULT = "false";
+
+  private static final String RAW_OPTIMIZED_DEDICATED_THREADPOOL = "measurement.raw.dedicated.threadpool";
+  private static final String RAW_OPTIMIZED_DEDICATED_THREADPOOL_DEFAULT = "false";
+
+  private static final String RAW_OPTIMIZED_THREADCOUNT = "measurement.raw.threadcount";
+  private static final String RAW_OPTIMIZED_THREADCOUNT_DEFAULT = "16";
 
   private static final String LATENCY_TRACKED_ERRORS_PROPERTY = "latencytrackederrors";
 
@@ -60,6 +74,26 @@ public class DBWrapper extends DB {
     scopeStringRead = simple + "#read";
     scopeStringScan = simple + "#scan";
     scopeStringUpdate = simple + "#update";
+    this.reportLatencyForEachError = Boolean.parseBoolean(getProperties().
+        getProperty(REPORT_LATENCY_FOR_EACH_ERROR_PROPERTY,
+            REPORT_LATENCY_FOR_EACH_ERROR_PROPERTY_DEFAULT));
+    this.measurementsDedicatedPool = Boolean.parseBoolean(getProperties().
+        getProperty(RAW_OPTIMIZED_DEDICATED_THREADPOOL,
+            RAW_OPTIMIZED_DEDICATED_THREADPOOL_DEFAULT));
+    this.measurementsThreads = Integer.parseInt(getProperties()
+        .getProperty(RAW_OPTIMIZED_THREADCOUNT, RAW_OPTIMIZED_THREADCOUNT_DEFAULT));
+
+    if(this.measurementsDedicatedPool)
+    {
+      System.err.println("Creating dedicated threadpool for rawoptimized measurements with " + this.measurementsThreads
+      + " threads");
+      this.les = MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(this.measurementsThreads));
+    }
+    else
+    {
+      this.les = null;
+      getProperties().setProperty(RAW_OPTIMIZED_THREADCOUNT, "16");
+    }
   }
 
   /**
@@ -96,9 +130,9 @@ public class DBWrapper extends DB {
         }
       }
 
-      System.err.println("DBWrapper: report latency for each error is " +
-          this.reportLatencyForEachError + " and specific error codes to track" +
-          " for latency are: " + this.latencyTrackedErrors.toString());
+      // System.err.println("DBWrapper: report latency for each error is " +
+      //     this.reportLatencyForEachError + " and specific error codes to track" +
+      //     " for latency are: " + this.latencyTrackedErrors.toString());
     }
   }
 
@@ -137,6 +171,49 @@ public class DBWrapper extends DB {
       measurements.reportStatus("READ", res);
       return res;
     }
+  }
+
+  /**
+   * Read asynchronously a record from the database. Each field/value pair from the result
+   * will be stored in a HashMap.
+   *
+   * @param table The name of the table
+   * @param key The record key of the record to read.
+   * @param fields The list of fields to read, or null for all of them
+   * @param result A HashMap of field/value pairs for the result
+   */
+  public ListenableFuture readAsync(String table, final String key, Set<String> fields,
+                     final HashMap<String, ByteIterator> result) {
+    try (final TraceScope span = tracer.newScope(scopeStringRead)) {
+      final long ist = measurements.getIntendedtartTimeNs();
+      final long st = System.nanoTime();
+      //Status res = db.read(table, key, fields, result);
+
+      ListenableFuture future = db.readAsync(table, key, fields, result);
+
+
+      Futures.addCallback(future,
+          new FutureCallback<Object>() {
+            @Override public void onSuccess(Object returned) {
+              long en = System.nanoTime();
+              Status res = db.parseReadAsync(key, returned, result);
+              measure("READ", res, ist, st, en);
+              measurements.reportStatus("READ", res);
+            }
+
+            @Override public void onFailure(Throwable t) {
+              //Output some error message
+            }
+          },
+          this.measurementsDedicatedPool ? this.les : MoreExecutors.sameThreadExecutor()
+      );
+    }
+    return null;
+  }
+
+  @Override
+  public Status parseReadAsync(String key, Object returned, HashMap<String, ByteIterator> result) {
+    throw new UnsupportedOperationException();
   }
 
   /**
@@ -242,5 +319,63 @@ public class DBWrapper extends DB {
       measurements.reportStatus("DELETE", res);
       return res;
     }
+  }
+
+  @Override
+  public ListenableFuture updateAsync(String table, String keyname, HashMap<String, ByteIterator> values) {
+    try (final TraceScope span = tracer.newScope(scopeStringUpdate)) {
+      final long ist = measurements.getIntendedtartTimeNs();
+      final long st = System.nanoTime();
+      //Status res = db.read(table, key, fields, result);
+
+      ListenableFuture future = db.updateAsync(table, keyname, values);
+
+      Futures.addCallback(future,
+          new FutureCallback<Object>() {
+            @Override public void onSuccess(Object returned) {
+              long en = System.nanoTime();
+
+              //FIXME For now, assume all requests are successful
+              measure("UPDATE", Status.OK, ist, st, en);
+              measurements.reportStatus("UPDATE", Status.OK);
+            }
+
+            @Override public void onFailure(Throwable t) {
+              //Output some error message
+            }
+          },
+          this.measurementsDedicatedPool ? this.les : MoreExecutors.sameThreadExecutor()
+      );
+    }
+    return null;
+  }
+
+  @Override
+  public ListenableFuture insertAsync(String table, String dbkey, HashMap<String, ByteIterator> values) {
+    try (final TraceScope span = tracer.newScope(scopeStringInsert)) {
+      final long ist = measurements.getIntendedtartTimeNs();
+      final long st = System.nanoTime();
+      //Status res = db.read(table, key, fields, result);
+
+      ListenableFuture future = db.insertAsync(table, dbkey, values);
+
+      Futures.addCallback(future,
+          new FutureCallback<Object>() {
+            @Override public void onSuccess(Object returned) {
+              long en = System.nanoTime();
+
+              //FIXME For now, assume all requests are successful
+              measure("INSERT", Status.OK, ist, st, en);
+              measurements.reportStatus("INSERT", Status.OK);
+            }
+
+            @Override public void onFailure(Throwable t) {
+              //Output some error message
+            }
+          },
+          this.measurementsDedicatedPool ? this.les : MoreExecutors.sameThreadExecutor()
+      );
+    }
+    return null;
   }
 }

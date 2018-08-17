@@ -17,20 +17,13 @@
  */
 package com.yahoo.ycsb.db;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.Host;
-import com.datastax.driver.core.HostDistance;
-import com.datastax.driver.core.Metadata;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.Statement;
+import com.datastax.driver.core.*;
+import com.datastax.driver.core.policies.*;
 import com.datastax.driver.core.querybuilder.Insert;
 import com.datastax.driver.core.querybuilder.QueryBuilder;
 import com.datastax.driver.core.querybuilder.Select;
+
+import com.google.common.util.concurrent.ListenableFuture;
 import com.yahoo.ycsb.ByteArrayByteIterator;
 import com.yahoo.ycsb.ByteIterator;
 import com.yahoo.ycsb.DB;
@@ -43,6 +36,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Vector;
 import java.util.concurrent.atomic.AtomicInteger;
+
+
+import java.net.InetSocketAddress;
+import java.util.List;
+import java.util.ArrayList;
 
 /**
  * Cassandra 2.x CQL client.
@@ -70,10 +68,10 @@ public class CassandraCQLClient extends DB {
   public static final String PORT_PROPERTY_DEFAULT = "9042";
 
   public static final String READ_CONSISTENCY_LEVEL_PROPERTY =
-      "cassandra.readconsistencylevel";
+      "cassandra_readconsistencylevel";
   public static final String READ_CONSISTENCY_LEVEL_PROPERTY_DEFAULT = "ONE";
   public static final String WRITE_CONSISTENCY_LEVEL_PROPERTY =
-      "cassandra.writeconsistencylevel";
+      "cassandra_writeconsistencylevel";
   public static final String WRITE_CONSISTENCY_LEVEL_PROPERTY_DEFAULT = "ONE";
 
   public static final String MAX_CONNECTIONS_PROPERTY =
@@ -87,7 +85,28 @@ public class CassandraCQLClient extends DB {
 
   public static final String TRACING_PROPERTY = "cassandra.tracing";
   public static final String TRACING_PROPERTY_DEFAULT = "false";
-  
+
+  public static final String NEW_CONNECTION_THRESHOLD_LOCAL_KEY =
+      "driver_newconnection_threshold_local";
+  public static final String NEW_CONNECTION_THRESHOLD_REMOTE_KEY =
+      "driver_newconnection_threshold_remote";
+
+  public static final String MAX_REQUESTS_PER_CONNECTION_LOCAL_KEY =
+      "driver_maxrequests_perconnection_local";
+  public static final String MAX_REQUESTS_PER_CONNECTION_REMOTE_KEY =
+      "driver_maxrequests_perconnection_remote";
+  public static final String MAX_QUEUE_SIZE =
+      "driver_maxqueuesize";
+  public static final String DRIVER_ARGS =
+      "driver_args";
+  public static final String DRIVER_LOADBALANCER =
+      "driver_loadbalancer";
+  public static final String DRIVER_RETRY =
+      "driver_retry";
+
+  // Options for RateAndServiceTimeAwarePolicy (KURMA)
+  public static final String DC_LATENCY_MATRIX = "dc_latency_matrix";
+
   /**
    * Count the number of times initialized to teardown on the last
    * {@link #cleanup()}.
@@ -97,32 +116,28 @@ public class CassandraCQLClient extends DB {
   private static boolean debug = false;
 
   private static boolean trace = false;
-  
+
   /**
    * Initialize any state for this DB. Called once per DB instance; there is one
    * DB instance per client thread.
    */
   @Override
   public void init() throws DBException {
-
     // Keep track of number of calls to init (for later cleanup)
     INIT_COUNT.incrementAndGet();
-
     // Synchronized so that we only have a single
     // cluster/session instance for all the threads.
     synchronized (INIT_COUNT) {
-
       // Check if the cluster has already been initialized
       if (cluster != null) {
         return;
       }
-
       try {
-
         debug =
             Boolean.parseBoolean(getProperties().getProperty("debug", "false"));
-        trace = Boolean.valueOf(getProperties().getProperty(TRACING_PROPERTY, TRACING_PROPERTY_DEFAULT));
-        
+        trace = Boolean.valueOf(getProperties().getProperty(
+            TRACING_PROPERTY, TRACING_PROPERTY_DEFAULT));
+
         String host = getProperties().getProperty(HOSTS_PROPERTY);
         if (host == null) {
           throw new DBException(String.format(
@@ -132,12 +147,37 @@ public class CassandraCQLClient extends DB {
         String[] hosts = host.split(",");
         String port = getProperties().getProperty(PORT_PROPERTY, PORT_PROPERTY_DEFAULT);
 
+        List<InetSocketAddress> whiteList = new ArrayList<InetSocketAddress>();
+        String coordinators = getProperties().getProperty("coordinators");
+        if (coordinators != null){
+          for (String c: coordinators.split(" ")){
+            whiteList.add(new InetSocketAddress(c, 9042));
+          }
+          System.err.println("Coordinators:");
+          for (InetSocketAddress i: whiteList){
+            System.err.println("\t"+i.toString());
+          }
+        }
+
+
+        LoadBalancingPolicy loadBalancingPolicy;
+        RetryPolicy retryPolicy;
+        SpeculativeExecutionPolicy speculativePolicy;
+
+        if(getProperties().getProperty(DRIVER_RETRY, "default").equals("disabled"))
+        {
+          retryPolicy = FallthroughRetryPolicy.INSTANCE;
+        }
+        else
+        {
+          retryPolicy = DefaultRetryPolicy.INSTANCE;
+        }
+
+
         String username = getProperties().getProperty(USERNAME_PROPERTY);
         String password = getProperties().getProperty(PASSWORD_PROPERTY);
-
         String keyspace = getProperties().getProperty(KEYSPACE_PROPERTY,
             KEYSPACE_PROPERTY_DEFAULT);
-
         readConsistencyLevel = ConsistencyLevel.valueOf(
             getProperties().getProperty(READ_CONSISTENCY_LEVEL_PROPERTY,
                 READ_CONSISTENCY_LEVEL_PROPERTY_DEFAULT));
@@ -145,13 +185,115 @@ public class CassandraCQLClient extends DB {
             getProperties().getProperty(WRITE_CONSISTENCY_LEVEL_PROPERTY,
                 WRITE_CONSISTENCY_LEVEL_PROPERTY_DEFAULT));
 
+        System.err.println("KBG - YCSB branch [Tectonic], CQL driver version: " +
+            Cluster.getDriverVersion());
+        System.err.println("KBG - ReadConsistencyLevel: " + readConsistencyLevel);
+        System.err.println("KBG - WriteConsistencyLevel: " + writeConsistencyLevel);
+
+        String loadBalancer = getProperties().getProperty(DRIVER_LOADBALANCER, "roundrobin");
         if ((username != null) && !username.isEmpty()) {
+          System.err.println("KBG - YCSB-1 ((username != null) && !username.isEmpty())");
           cluster = Cluster.builder().withCredentials(username, password)
               .withPort(Integer.valueOf(port)).addContactPoints(hosts).build();
+        } else if (whiteList.size() > 0) {
+          String includedCoordinators = "";
+
+          for (InetSocketAddress coords : whiteList) {
+            includedCoordinators += coords.toString();
+          }
+          System.err.println("KBG - YCSB-2 whiteList: " + includedCoordinators);
+          loadBalancingPolicy = new RoundRobinPolicy();
+
+          cluster = Cluster.builder()
+              .withPort(Integer.valueOf(port))
+              .withLoadBalancingPolicy(new WhiteListPolicy(loadBalancingPolicy, whiteList))
+              .withAddressTranslator(new EC2MultiRegionAddressTranslator())
+              .withRetryPolicy(retryPolicy)
+              .addContactPoints(hosts).build();
+
+        } else if (loadBalancer.equals("static")) {
+          System.err.println("KBG - LoadBalancer static");
+
+          float remoteRate = Float.parseFloat(getProperties().getProperty("remoterate", "1.0"));
+          String localDC = getProperties().getProperty("localdc", "datacenter1");
+
+          loadBalancingPolicy = DCAwareStaticMappingPolicy.builder().withLocalDc(localDC)
+              .withRemoteDcRate(remoteRate).build();
+
+          cluster = Cluster.builder()
+              .withPort(Integer.valueOf(port))
+              .withLoadBalancingPolicy(loadBalancingPolicy)
+              .withAddressTranslator(new EC2MultiRegionAddressTranslator())
+              .withRetryPolicy(retryPolicy)
+              .addContactPoints(hosts).build();
+
+        } else if (loadBalancer.equals("drc")) {
+          System.err.println("KBG - YCSB-4 DRC");
+
+          String dc_latency_matrix = getProperties().getProperty(DC_LATENCY_MATRIX,
+            "3,DC1,DC2,DC3,0,5,7,5,0,2,7,2,0");
+
+          String driver_args = getProperties().getProperty(DRIVER_ARGS,
+            "");
+
+          loadBalancingPolicy = RateAndServiceTimeAwarePolicy.builder()
+              .withDCLatencyMatrix(dc_latency_matrix)
+              .withArgs(driver_args)
+              .build();
+
+          cluster = Cluster.builder()
+              .withPort(Integer.valueOf(port))
+              .withLoadBalancingPolicy(loadBalancingPolicy)
+              .withAddressTranslator(new EC2MultiRegionAddressTranslator())
+              .withRetryPolicy(retryPolicy)
+              .addContactPoints(hosts).build();
+
+
+        } else if (loadBalancer.equals("latency")) {
+          System.err.println("KBG - YCSB-5 Latency Aware");
+
+          LatencyAwarePolicy latencyAwarePolicy = LatencyAwarePolicy.builder(new RoundRobinPolicy())
+                .withMininumMeasurements(1) // This value taken from Class tests
+                .build();
+
+          cluster = Cluster.builder()
+              .withPort(Integer.valueOf(port))
+              .withLoadBalancingPolicy(latencyAwarePolicy)
+              .withAddressTranslator(new EC2MultiRegionAddressTranslator())
+              .withRetryPolicy(retryPolicy)
+              .addContactPoints(hosts).build();
+
+
+        } else if (loadBalancer.equals("dcrr")) {
+          System.err.println("KBG - YCSB-6 Local DC Round Robin");
+
+
+          String localDC = getProperties().getProperty("localdc", "datacenter1");
+
+          cluster = Cluster.builder()
+              .withPort(Integer.valueOf(port))
+              .withLoadBalancingPolicy(DCAwareRoundRobinPolicy.builder().withLocalDc(localDC).build())
+              .withAddressTranslator(new EC2MultiRegionAddressTranslator())
+              .withRetryPolicy(retryPolicy)
+              .addContactPoints(hosts)
+              .build();
+
+
         } else {
-          cluster = Cluster.builder().withPort(Integer.valueOf(port))
+          System.err.println("KBG - YCSB-7 default option (round robin)" + loadBalancer);
+          // cluster = Cluster.builder().withPort(Integer.valueOf(port))
+          //     .addContactPoints(hosts).build();
+
+          loadBalancingPolicy = new RoundRobinPolicy();
+
+          cluster = Cluster.builder()
+              .withPort(Integer.valueOf(port))
+              .withLoadBalancingPolicy(loadBalancingPolicy)
+              .withAddressTranslator(new EC2MultiRegionAddressTranslator())
+              .withRetryPolicy(retryPolicy)
               .addContactPoints(hosts).build();
         }
+
 
         String maxConnections = getProperties().getProperty(
             MAX_CONNECTIONS_PROPERTY);
@@ -160,7 +302,6 @@ public class CassandraCQLClient extends DB {
               .setMaxConnectionsPerHost(HostDistance.LOCAL,
               Integer.valueOf(maxConnections));
         }
-
         String coreConnections = getProperties().getProperty(
             CORE_CONNECTIONS_PROPERTY);
         if (coreConnections != null) {
@@ -168,33 +309,58 @@ public class CassandraCQLClient extends DB {
               .setCoreConnectionsPerHost(HostDistance.LOCAL,
               Integer.valueOf(coreConnections));
         }
-
         String connectTimoutMillis = getProperties().getProperty(
             CONNECT_TIMEOUT_MILLIS_PROPERTY);
         if (connectTimoutMillis != null) {
           cluster.getConfiguration().getSocketOptions()
               .setConnectTimeoutMillis(Integer.valueOf(connectTimoutMillis));
         }
-
         String readTimoutMillis = getProperties().getProperty(
             READ_TIMEOUT_MILLIS_PROPERTY);
         if (readTimoutMillis != null) {
           cluster.getConfiguration().getSocketOptions()
               .setReadTimeoutMillis(Integer.valueOf(readTimoutMillis));
         }
+        String prop = getProperties().getProperty(NEW_CONNECTION_THRESHOLD_LOCAL_KEY);
+        if (prop != null) {
+          cluster.getConfiguration().getPoolingOptions()
+              .setNewConnectionThreshold(HostDistance.LOCAL, Integer.parseInt(prop));
+          System.err.println("Setting NEW_CONNECTION_THRESHOLD_LOCAL_KEY to " + prop);
+        }
+        prop = getProperties().getProperty(NEW_CONNECTION_THRESHOLD_REMOTE_KEY);
+        if (prop != null) {
+          cluster.getConfiguration().getPoolingOptions()
+              .setNewConnectionThreshold(HostDistance.REMOTE, Integer.parseInt(prop));
+          System.err.println("Setting NEW_CONNECTION_THRESHOLD_REMOTE_KEY to " + prop);
+        }
+        prop = getProperties().getProperty(MAX_REQUESTS_PER_CONNECTION_LOCAL_KEY);
+        if (prop != null) {
+          cluster.getConfiguration().getPoolingOptions()
+              .setMaxRequestsPerConnection(HostDistance.LOCAL, Integer.parseInt(prop));
+          System.err.println("Setting MAX_REQUESTS_PER_CONNECTION_LOCAL_KEY to " + prop);
+        }
+        prop = getProperties().getProperty(MAX_REQUESTS_PER_CONNECTION_REMOTE_KEY);
+        if (prop != null) {
+          cluster.getConfiguration().getPoolingOptions()
+              .setMaxRequestsPerConnection(HostDistance.REMOTE, Integer.parseInt(prop));
+          System.err.println("Setting MAX_REQUESTS_PER_CONNECTION_REMOTE_KEY to " + prop);
+        }
+        prop = getProperties().getProperty(MAX_QUEUE_SIZE);
+        if (prop != null) {
+          cluster.getConfiguration().getPoolingOptions()
+              .setMaxQueueSize(Integer.parseInt(prop));
+          System.err.println("Setting MAX_QUEUE_SIZE to " + prop);
+        }
 
         Metadata metadata = cluster.getMetadata();
         System.err.printf("Connected to cluster: %s\n",
             metadata.getClusterName());
-
         for (Host discoveredHost : metadata.getAllHosts()) {
-          System.out.printf("Datacenter: %s; Host: %s; Rack: %s\n",
+          System.err.printf("Datacenter: %s; Host: %s; Rack: %s\n",
               discoveredHost.getDatacenter(), discoveredHost.getAddress(),
               discoveredHost.getRack());
         }
-
         session = cluster.connect(keyspace);
-
       } catch (Exception e) {
         throw new DBException(e);
       }
@@ -258,12 +424,12 @@ public class CassandraCQLClient extends DB {
       stmt.setConsistencyLevel(readConsistencyLevel);
 
       if (debug) {
-        System.out.println(stmt.toString());
+        System.err.println(stmt.toString());
       }
       if (trace) {
         stmt.enableTracing();
       }
-      
+
       ResultSet rs = session.execute(stmt);
 
       if (rs.isExhausted()) {
@@ -287,10 +453,83 @@ public class CassandraCQLClient extends DB {
 
     } catch (Exception e) {
       e.printStackTrace();
-      System.out.println("Error reading key: " + key);
+      System.err.println("Error reading key: " + key);
       return Status.ERROR;
     }
 
+  }
+
+  /**
+   * Read a record asynchronously from the database. Each field/value pair from the result will
+   * be stored in a HashMap.
+   *
+   * @param table
+   *          The name of the table
+   * @param key
+   *          The record key of the record to read.
+   * @param fields
+   *          The list of fields to read, or null for all of them
+   * @return Zero on success, a non-zero error code on error
+   */
+  @Override
+  public ResultSetFuture readAsync(String table, String key, Set<String> fields, HashMap<String, ByteIterator> result) {
+      Statement stmt;
+      Select.Builder selectBuilder;
+
+      if (fields == null) {
+        selectBuilder = QueryBuilder.select().all();
+      } else {
+        selectBuilder = QueryBuilder.select();
+        for (String col : fields) {
+          ((Select.Selection) selectBuilder).column(col);
+        }
+      }
+
+      stmt = selectBuilder.from(table).where(QueryBuilder.eq(YCSB_KEY, key))
+          .limit(1);
+      stmt.setConsistencyLevel(readConsistencyLevel);
+
+      if (debug) {
+        System.err.println(stmt.toString());
+      }
+      if (trace) {
+        stmt.enableTracing();
+      }
+
+      ResultSetFuture rsf = session.executeAsync(stmt);
+
+      return rsf;
+
+  }
+
+  @Override
+  public Status parseReadAsync(String key, Object returned, HashMap<String, ByteIterator> result) {
+    try {
+      ResultSet rs = (ResultSet) returned;
+      if (rs.isExhausted()) {
+        return Status.NOT_FOUND;
+      }
+
+      // Should be only 1 row
+      Row row = rs.one();
+      ColumnDefinitions cd = row.getColumnDefinitions();
+
+      for (ColumnDefinitions.Definition def : cd) {
+        ByteBuffer val = row.getBytesUnsafe(def.getName());
+        if (val != null) {
+          result.put(def.getName(), new ByteArrayByteIterator(val.array()));
+        } else {
+          result.put(def.getName(), null);
+        }
+      }
+
+      return Status.OK;
+
+    } catch (Exception e) {
+      e.printStackTrace();
+      System.err.println("Error reading key: " + key);
+      return Status.ERROR;
+    }
   }
 
   /**
@@ -350,12 +589,12 @@ public class CassandraCQLClient extends DB {
       stmt.setConsistencyLevel(readConsistencyLevel);
 
       if (debug) {
-        System.out.println(stmt.toString());
+        System.err.println(stmt.toString());
       }
       if (trace) {
         stmt.enableTracing();
       }
-      
+
       ResultSet rs = session.execute(stmt);
 
       HashMap<String, ByteIterator> tuple;
@@ -381,7 +620,7 @@ public class CassandraCQLClient extends DB {
 
     } catch (Exception e) {
       e.printStackTrace();
-      System.out.println("Error scanning with startkey: " + startkey);
+      System.err.println("Error scanning with startkey: " + startkey);
       return Status.ERROR;
     }
 
@@ -442,12 +681,12 @@ public class CassandraCQLClient extends DB {
       insertStmt.setConsistencyLevel(writeConsistencyLevel);
 
       if (debug) {
-        System.out.println(insertStmt.toString());
+        System.err.println(insertStmt.toString());
       }
       if (trace) {
         insertStmt.enableTracing();
       }
-      
+
       session.execute(insertStmt);
 
       return Status.OK;
@@ -478,21 +717,56 @@ public class CassandraCQLClient extends DB {
       stmt.setConsistencyLevel(writeConsistencyLevel);
 
       if (debug) {
-        System.out.println(stmt.toString());
+        System.err.println(stmt.toString());
       }
       if (trace) {
         stmt.enableTracing();
       }
-      
+
       session.execute(stmt);
 
       return Status.OK;
     } catch (Exception e) {
       e.printStackTrace();
-      System.out.println("Error deleting key: " + key);
+      System.err.println("Error deleting key: " + key);
     }
 
     return Status.ERROR;
+  }
+
+  @Override
+  public ListenableFuture updateAsync(String table, String keyname, HashMap<String, ByteIterator> values) {
+    return insertAsync(table, keyname, values);
+  }
+
+  @Override
+  public ListenableFuture insertAsync(String table, String dbkey, HashMap<String, ByteIterator> values) {
+      Insert insertStmt = QueryBuilder.insertInto(table);
+
+      // Add key
+      insertStmt.value(YCSB_KEY, dbkey);
+
+      // Add fields
+      for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
+        Object value;
+        ByteIterator byteIterator = entry.getValue();
+        value = byteIterator.toString();
+
+        insertStmt.value(entry.getKey(), value);
+      }
+
+      insertStmt.setConsistencyLevel(writeConsistencyLevel);
+
+      if (debug) {
+        System.err.println(insertStmt.toString());
+      }
+      if (trace) {
+        insertStmt.enableTracing();
+      }
+
+      ResultSetFuture rsf = session.executeAsync(insertStmt);
+
+      return rsf;
   }
 
 }

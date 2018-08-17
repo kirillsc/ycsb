@@ -39,9 +39,11 @@ LICENSE file.
   <dependencies>
     <!-- CQL driver -->
     <dependency>
+      <systemPath>${pom.basedir}/src/main/resources/custom-driver-core-3.0.8.jar</systemPath>
+      <scope>system</scope>
       <groupId>com.datastax.cassandra</groupId>
       <artifactId>cassandra-driver-core</artifactId>
-      <version>${cassandra.cql.version}</version>
+      <version>3.0.8</version>
     </dependency>
     <dependency>
       <groupId>com.yahoo.ycsb</groupId>

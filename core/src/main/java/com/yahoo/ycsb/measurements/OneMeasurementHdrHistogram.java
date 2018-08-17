@@ -43,6 +43,7 @@ public class OneMeasurementHdrHistogram extends OneMeasurement {
 
   private final Recorder histogram;
   private Histogram totalHistogram;
+  private int sloViolations;
 
   /**
    * The name of the property for deciding what percentile values to output.
@@ -54,11 +55,43 @@ public class OneMeasurementHdrHistogram extends OneMeasurement {
    */
   public static final String PERCENTILES_PROPERTY_DEFAULT = "95,99";
 
+  /**
+   * The name of the property for deciding what is the SLO latency bound.
+   */
+  public static final String SLO_PROPERTY = "hdrhistogram.slo";
+
+  /**
+   * The default value for the hdrhistogram.slo property (in us).
+   */
+  public static final String SLO_PROPERTY_DEFAULT = "2500";
+
+  /**
+   * The name of the property for deciding what is the time skip period.
+   */
+  public static final String TIMESKIP_PROPERTY = "hdrhistogram.timeskip";
+
+  /**
+   * The default value for the hdrhistogram.timeskip property (in seconds).
+   */
+  public static final String TIMESKIP_PROPERTY_DEFAULT = "0";
+
+
   private final List<Double> percentiles;
+
+  private double slo;
+
+  private Long firstReqArrivalTS;
+
+  private Long timeSkipNanos;
 
   public OneMeasurementHdrHistogram(String name, Properties props) {
     super(name);
     percentiles = getPercentileValues(props.getProperty(PERCENTILES_PROPERTY, PERCENTILES_PROPERTY_DEFAULT));
+    slo = Double.parseDouble(props.getProperty(SLO_PROPERTY, SLO_PROPERTY_DEFAULT));
+    sloViolations = 0;
+    firstReqArrivalTS = null;
+    //System.out.println("Not skipping " + Integer.parseInt(props.getProperty(TIMESKIP_PROPERTY, TIMESKIP_PROPERTY_DEFAULT)));
+    timeSkipNanos = Long.parseLong(props.getProperty(TIMESKIP_PROPERTY, TIMESKIP_PROPERTY_DEFAULT))*1000000000;
     boolean shouldLog = Boolean.parseBoolean(props.getProperty("hdrhistogram.fileoutput", "false"));
     if (!shouldLog) {
       log = null;
@@ -86,7 +119,18 @@ public class OneMeasurementHdrHistogram extends OneMeasurement {
    * Using {@link Recorder} to support concurrent updates to histogram.
    */
   public void measure(int latencyInMicros) {
-    histogram.recordValue(latencyInMicros);
+    if(firstReqArrivalTS == null)
+      firstReqArrivalTS = System.nanoTime();
+
+    long skipUntilNanos = firstReqArrivalTS+timeSkipNanos;
+
+    if(System.nanoTime() >= skipUntilNanos) {
+      //System.out.println("Not skipping " + timeskip_nanos);
+      if (latencyInMicros > slo) {
+        sloViolations++;
+      }
+      histogram.recordValue(latencyInMicros);
+    }
   }
 
   /**
@@ -101,10 +145,14 @@ public class OneMeasurementHdrHistogram extends OneMeasurement {
       // we can close now
       log.close();
     }
+    double percSLOViolations = ((double)sloViolations)/totalHistogram.getTotalCount()*100.0;
     exporter.write(getName(), "Operations", totalHistogram.getTotalCount());
     exporter.write(getName(), "AverageLatency(us)", totalHistogram.getMean());
     exporter.write(getName(), "MinLatency(us)", totalHistogram.getMinValue());
     exporter.write(getName(), "MaxLatency(us)", totalHistogram.getMaxValue());
+    exporter.write(getName(), "SLO Target(us)", slo);
+    exporter.write(getName(), "SLO Violations(%)", percSLOViolations);
+
 
     for (Double percentile : percentiles) {
       exporter.write(getName(), ordinal(percentile) + "PercentileLatency(us)",

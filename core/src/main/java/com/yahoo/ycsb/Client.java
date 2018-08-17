@@ -20,6 +20,7 @@ package com.yahoo.ycsb;
 import com.yahoo.ycsb.measurements.Measurements;
 import com.yahoo.ycsb.measurements.exporter.MeasurementsExporter;
 import com.yahoo.ycsb.measurements.exporter.TextMeasurementsExporter;
+import com.yahoo.ycsb.workloads.TraceWorkload;
 import org.apache.htrace.core.HTraceConfiguration;
 import org.apache.htrace.core.TraceScope;
 import org.apache.htrace.core.Tracer;
@@ -235,7 +236,7 @@ class StatusThread extends Thread {
     measurements.measure("THREAD_COUNT", threads);
 
     // TODO - once measurements allow for other number types, switch to using
-    // the raw bytes. Otherwise we can track in MB to avoid negative values 
+    // the raw bytes. Otherwise we can track in MB to avoid negative values
     // when faced with huge heaps.
     final int usedMem = Utils.getUsedMemoryMegaBytes();
     if (usedMem < minUsedMem) {
@@ -374,8 +375,13 @@ class ClientThread implements Runnable {
   private int threadcount;
   private Object workloadstate;
   private Properties props;
-  private long targetOpsTickNs;
+  private long targetOpsTickNs = Long.MAX_VALUE;
   private final Measurements measurements;
+
+  private static final String STARTTIME_PROPERTY="starttime";
+  private static final String STARTTIME_PROPERTY_DEFAULT=Long.toString(System.currentTimeMillis());
+
+  private static long sync_start_timestamp;
 
   /**
    * Constructor.
@@ -400,9 +406,14 @@ class ClientThread implements Runnable {
       targetOpsTickNs = (long) (1000000 / targetOpsPerMs);
     }
     this.props = props;
+
+    sync_start_timestamp = Long.parseLong(props.getProperty(STARTTIME_PROPERTY, STARTTIME_PROPERTY_DEFAULT));
+
     measurements = Measurements.getMeasurements();
     spinSleep = Boolean.valueOf(this.props.getProperty("spin.sleep", "false"));
     this.completeLatch = completeLatch;
+
+
   }
 
   public int getOpsDone() {
@@ -433,13 +444,33 @@ class ClientThread implements Runnable {
     //spread the thread operations out so they don't all hit the DB at the same time
     // GH issue 4 - throws exception if _target>1 because random.nextInt argument must be >0
     // and the sleep() doesn't make sense for granularities < 1 ms anyway
-    if ((targetOpsPerMs > 0) && (targetOpsPerMs <= 1.0)) {
+    // it also does not make sense to add random delays if we are using a trace for the timestamps
+    if ((targetOpsPerMs > 0) && (targetOpsPerMs <= 1.0) && !(workload instanceof TraceWorkload)) {
       long randomMinorDelay = Utils.random().nextInt((int) targetOpsTickNs);
       sleepUntil(System.nanoTime() + randomMinorDelay);
     }
+
+    long initTime = System.currentTimeMillis();
+
+    //sleep until specificied start time to synchronize YCSB instances
+    if(sync_start_timestamp > initTime) {
+      long sleep_duration_ns = (sync_start_timestamp - initTime)*1000000;
+      System.out.println("KBGT Initiating synchronization sleep for " + sleep_duration_ns / 1e9+ " sec");
+      sleepUntil(System.nanoTime() + sleep_duration_ns);
+    }
+    System.out.println("KBGT Starting YCSB execution now: " + System.currentTimeMillis() + " " + (new Date()).toString());
+
+
     try {
       if (dotransactions) {
+
         long startTimeNanos = System.nanoTime();
+
+        //if we are using a trace to dictate tx time, check if we need to throttle for the first request
+        if(workload instanceof TraceWorkload) {
+          throttleNanos(startTimeNanos);
+        }
+
 
         while (((opcount == 0) || (opsdone < opcount)) && !workload.isStopRequested()) {
 
@@ -449,10 +480,17 @@ class ClientThread implements Runnable {
 
           opsdone++;
 
-          throttleNanos(startTimeNanos);
+          if(!throttleNanos(startTimeNanos)) {
+            break;
+          }
         }
       } else {
         long startTimeNanos = System.nanoTime();
+
+        //if we are using a trace to dictate tx time, check if we need to throttle for the first request
+        if(workload instanceof TraceWorkload) {
+          throttleNanos(startTimeNanos);
+        }
 
         while (((opcount == 0) || (opsdone < opcount)) && !workload.isStopRequested()) {
 
@@ -462,7 +500,9 @@ class ClientThread implements Runnable {
 
           opsdone++;
 
-          throttleNanos(startTimeNanos);
+          if(!throttleNanos(startTimeNanos)) {
+            break;
+          }
         }
       }
     } catch (Exception e) {
@@ -483,21 +523,30 @@ class ClientThread implements Runnable {
   }
 
   private static void sleepUntil(long deadline) {
+    //System.out.println(Thread.currentThread().getId() + " Sleep " + (deadline - System.nanoTime()));
     while (System.nanoTime() < deadline) {
       if (!spinSleep) {
         LockSupport.parkNanos(deadline - System.nanoTime());
       }
     }
+    //System.out.println(Thread.currentThread().getId() + " Wake " + (deadline - System.nanoTime()));
   }
 
-  private void throttleNanos(long startTimeNanos) {
+  private boolean throttleNanos(long startTimeNanos) {
     //throttle the operations
-    if (targetOpsPerMs > 0) {
+    if (targetOpsPerMs > 0 || (workload instanceof TraceWorkload && getOpsTodo() > 0)) {
       // delay until next tick
-      long deadline = startTimeNanos + opsdone * targetOpsTickNs;
+      long deadline = workload.getDeadlineForTransaction(startTimeNanos, opsdone, targetOpsTickNs);
+
+      //if the deadline is -1, this indicates that our trace has ended
+      if(deadline == -1) {
+        return false;
+      }
+      //System.out.println(Thread.currentThread().getId() + " r.deadline " + (deadline-startTimeNanos));
       sleepUntil(deadline);
       measurements.setIntendedStartTimeNs(deadline);
     }
+    return true;
   }
 
   /**
@@ -869,6 +918,12 @@ public final class Client {
         }
 
         int threadopcount = opcount / threadcount;
+
+        if(threadopcount < 1 && opcount != 0)
+        {
+          System.err.println("[Error] : Non-zero operation count is lower than number of threads.");
+          System.exit(0);
+        }
 
         // ensure correct number of operations, in case opcount is not a multiple of threadcount
         if (threadid < opcount % threadcount) {
